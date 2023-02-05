@@ -146,7 +146,7 @@ proc parseIdent(stream: Stream): Node =
 
 proc parseFunc(stream: Stream): Node =
   # expect first to be a lambda
-  assert stream.readRune() == LAMBDA
+  assert stream.readRune() in [LAMBDA, "¦".runeAt(0)]
   stream.skip()
   let arg = parseIdentImpl(stream)
   stream.skip()
@@ -161,7 +161,7 @@ proc parseExpression(stream: Stream): Node =
     stream.skip()
     if stream.atEnd(): break
     case stream.peekRune()
-    of LAMBDA: buff.add stream.parseFunc()
+    of LAMBDA, "¦".runeAt(0): buff.add stream.parseFunc()
     of '('.Rune:
       discard stream.readChar()
       let sexpr = stream.parseExpression()
@@ -179,7 +179,7 @@ proc parseExpression(stream: Stream): Node =
 when defined(demo):
   let env = {
     "S".toRunes(): newStringStream("λf.λg.λx.(g x)(f x)").parseExpression(),
-    "I".toRunes(): newStringStream("λx.x").parseExpression()
+    "I".toRunes(): newStringStream("¦x.x").parseExpression()
   }.toTable
 
   var exp = newStringStream(" S I I ").parseExpression()
