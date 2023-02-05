@@ -2,6 +2,7 @@ import unicode, streams, tables
 import strformat
 
 const LAMBDA = "λ".runeAt(0)
+const LAMBAR = "¦".runeAt(0)
 
 type
   Elemkind = enum
@@ -83,7 +84,8 @@ func apply(f, x: Node): Node =
 type Action = enum
   None, Apply, Unpack, Subbing
 
-type Env = Table[seq[Rune], Node]
+type Env = TableRef[seq[Rune], Node]
+
 func modifMid(exp: Node, env: Env): tuple[res: Node, act: Action]
 
 func modif(exp: Node, env: Env): tuple[res: Node, act: Action] =
@@ -95,6 +97,8 @@ func modif(exp: Node, env: Env): tuple[res: Node, act: Action] =
       let (nbody, act) = exp.elem.body.modif(env)
       let nfunc = Elem(kind: ekFunc, arg: exp.elem.arg, body: nbody)
       return (Node(kind: nkElem, elem: nfunc), act)
+    if exp.elem.kind == ekIdent and exp.elem.id in env:
+      return (env[exp.elem.id], Subbing)
     return (exp, None)
   of nkLink:
     let (held, next) = (exp.held, exp.next)
@@ -122,6 +126,13 @@ func modifMid(exp: Node, env: Env): tuple[res: Node, act: Action] =
   let (nnext, act) = modifMid(next, env)
   return (Node(kind: nkLink, held: held, next: nnext), act)
 
+func shape(node: Node): string =
+  case node.kind
+  of nkElem, nkTermin:
+    $node.kind
+  of nkLink:
+   fmt"{node.kind}({node.held.kind}, {node.next.kind})"
+
 proc readRune(stream: Stream): Rune =
   let l = stream.peekStr(1).runeLenAt(0)
   stream.readStr(l).runeAt(0)
@@ -138,7 +149,7 @@ proc parseExpression(stream: Stream): Node
 
 proc parseIdentImpl(stream: Stream): seq[Rune] =
   result = newSeq[Rune]()
-  while (not stream.atEnd) and (stream.peekRune() notin " \t\nλ.()".toRunes()):
+  while (not stream.atEnd) and (stream.peekRune() notin " \t\nλ¦.()".toRunes()):
     result.add stream.readRune()
 
 proc parseIdent(stream: Stream): Node =
@@ -146,7 +157,7 @@ proc parseIdent(stream: Stream): Node =
 
 proc parseFunc(stream: Stream): Node =
   # expect first to be a lambda
-  assert stream.readRune() in [LAMBDA, "¦".runeAt(0)]
+  assert stream.readRune() in [LAMBDA, LAMBAR]
   stream.skip()
   let arg = parseIdentImpl(stream)
   stream.skip()
@@ -161,7 +172,7 @@ proc parseExpression(stream: Stream): Node =
     stream.skip()
     if stream.atEnd(): break
     case stream.peekRune()
-    of LAMBDA, "¦".runeAt(0): buff.add stream.parseFunc()
+    of LAMBDA, LAMBAR: buff.add stream.parseFunc()
     of '('.Rune:
       discard stream.readChar()
       let sexpr = stream.parseExpression()
@@ -176,23 +187,100 @@ proc parseExpression(stream: Stream): Node =
   for i in countdown(buff.len - 1, 0):
     result = Node(kind: nkLink, held: buff[i], next: result)
 
-when defined(demo):
-  let env = {
-    "S".toRunes(): newStringStream("λf.λg.λx.(g x)(f x)").parseExpression(),
-    "I".toRunes(): newStringStream("¦x.x").parseExpression()
-  }.toTable
 
-  var exp = newStringStream(" S I I ").parseExpression()
+proc solve(exp: Node, env: Env): Node =
+  var res = exp
+  var act = Unpack
+  while act != None:
+    echo fmt "{act}\t=> {res.render}"
+    echo fmt "{act}\t:: {shape(res)}"
+    (res, act) = res.modif(env)
+  return res
+
+when defined(demo):
+  let env: Env = {
+    "S".toRunes(): newStringStream("λf.λg.λx.(g x)(f x)").parseExpression(),
+    "K".toRunes(): newStringStream("λx.λy.x").parseExpression(),
+    "I".toRunes(): newStringStream("¦x.x").parseExpression()
+  }.newTable
+
+  var exp = newStringStream("S (S K K) (S K K)").parseExpression()
   echo fmt"[{exp.render}]"
-  block:
-    var res: Node = exp
-    var prev: Node = exp
-    var act: Action = Unpack
-    while act != None:
-      if act != None: echo fmt"=> {res.render}"
-      (res, act) = res.modif(env)
-      if act == Subbing:
-        echo fmt"subbing({prev.kind})"
-        echo fmt"   {prev.render} => {res.render}"
-      prev = res
-    exp = res
+  discard solve(exp, env)
+
+type
+  StmtKind = enum
+    skNone, skEval, skAssign, skConsist
+  Stmt = ref object
+    case kind: StmtKind
+    of skNone: discard
+    of skEval: exp: Node
+    of skAssign, skConsist:
+      target: seq[Rune]
+      value: Node
+
+proc parseStmt(stream: Stream): Stmt =
+  stream.skip()
+  if stream.atEnd() or stream.peekChar() == '\n':
+     return Stmt(kind: skNone)
+
+  case stream.peekRune()
+  of '('.Rune, LAMBDA, LAMBAR:
+    result = Stmt(kind: skEval, exp: stream.parseExpression())
+    stream.skip()
+    assert stream.readChar() == '\n'
+  else:
+    let ident = stream.parseIdentImpl()
+    stream.skip()
+    case stream.peekChar()
+    of ':':
+      assert stream.readStr(3) == "::="
+      stream.skip()
+      result =  Stmt(kind: skConsist, target: ident, value: stream.parseExpression())
+      stream.skip()
+      assert stream.readChar() == '\n'
+    of '=':
+      discard stream.readChar()
+      stream.skip()
+      result =  Stmt(kind: skAssign, target: ident, value: stream.parseExpression())
+      stream.skip()
+      assert stream.readChar() == '\n'
+    else:
+      var tail = stream.parseExpression()
+      if tail.kind == nkElem:
+        tail = Node(kind: nkLink, held: tail, next: Node(kind: nkTermin))
+      let held = Node(kind: nkElem, elem: Elem(kind: ekIdent, id: ident))
+      result = Stmt(kind: skEval, exp: Node(kind: nkLink, held: held, next: tail))
+      stream.skip()
+      assert stream.readChar() == '\n'
+
+func `$`(stm: Stmt): string =
+  case stm.kind
+  of skNone: "// Nothing"
+  of skEval: stm.exp.render()
+  of skAssign: fmt"{stm.target} = {stm.value.render}"
+  of skConsist: fmt"{stm.target} ::= {stm.value.render}"
+
+proc step(stream: Stream, env: var Env) =
+  let stm = stream.parseStmt()
+  echo "        ", stm
+  case stm.kind
+  of skNone: return
+  of skEval:
+    discard stm.exp.solve(env)
+  of skConsist:
+    env[stm.target] = stm.value
+  of skAssign:
+    env[stm.target] = stm.value.solve(env)
+
+block:
+  var inp = newStringStream("""
+I = (¦x.x) ¦x.x
+K ::= ¦x.¦y.x
+K I K
+""")
+  var env: Env = newTable[seq[Rune], Node]()
+  inp.step(env)
+  inp.step(env)
+  inp.step(env)
+
