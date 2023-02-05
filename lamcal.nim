@@ -1,4 +1,5 @@
 import unicode, streams, tables
+import os
 import strformat
 
 const LAMBDA = "λ".runeAt(0)
@@ -187,14 +188,23 @@ proc parseExpression(stream: Stream): Node =
   for i in countdown(buff.len - 1, 0):
     result = Node(kind: nkLink, held: buff[i], next: result)
 
-
 proc solve(exp: Node, env: Env): Node =
   var res = exp
   var act = Unpack
   while act != None:
     echo fmt "{act}\t=> {res.render}"
-    echo fmt "{act}\t:: {shape(res)}"
+#    echo fmt "{act}\t:: {shape(res)}"
     (res, act) = res.modif(env)
+  return res
+
+proc solveSlow(exp: Node, env: Env): Node =
+  var res = exp
+  var act = Unpack
+  while act != None:
+    echo fmt "{act}\t=> {res.render}"
+#    echo fmt "{act}\t:: {shape(res)}"
+    (res, act) = res.modif(env)
+    sleep(33)
   return res
 
 when defined(demo):
@@ -221,8 +231,11 @@ type
 
 proc parseStmt(stream: Stream): Stmt =
   stream.skip()
-  if stream.atEnd() or stream.peekChar() == '\n':
-     return Stmt(kind: skNone)
+  while stream.peekChar() == '\n':
+    if stream.atEnd():
+      return Stmt(kind: skNone)
+    discard stream.readChar()
+    stream.skip()
 
   case stream.peekRune()
   of '('.Rune, LAMBDA, LAMBAR:
@@ -267,20 +280,25 @@ proc step(stream: Stream, env: var Env) =
   case stm.kind
   of skNone: return
   of skEval:
-    discard stm.exp.solve(env)
+    discard stm.exp.solveSlow(env)
   of skConsist:
     env[stm.target] = stm.value
   of skAssign:
-    env[stm.target] = stm.value.solve(env)
+    env[stm.target] = stm.value.solveSlow(env)
+  echo "."
 
 block:
   var inp = newStringStream("""
-I = (¦x.x) ¦x.x
+S ::= ¦f.¦g.¦x.(g x) (f x)
 K ::= ¦x.¦y.x
-K I K
+I = S K K
+M = S (S K K) (S K K)
+
+M K I
 """)
   var env: Env = newTable[seq[Rune], Node]()
-  inp.step(env)
-  inp.step(env)
-  inp.step(env)
+  var sin = stdin.newFileStream
+  while not inp.atEnd():
+    inp.step(env)
+    discard sin.readLine()
 
