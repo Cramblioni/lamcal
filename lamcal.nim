@@ -103,7 +103,7 @@ func modif(exp: Node, env: Env): tuple[res: Node, act: Action] =
     return (exp, None)
   of nkLink:
     let (held, next) = (exp.held, exp.next)
-    if next.kind == nkTermin and held.kind != nkLink:
+    if next.kind == nkTermin: #and held.kind != nkLink:
       return (held, Unpack)
     if held.kind == nkLink:
       let (res, act) = modif(held, env)
@@ -118,21 +118,34 @@ func modif(exp: Node, env: Env): tuple[res: Node, act: Action] =
     return modifMid(exp, env)
 
 func modifMid(exp: Node, env: Env): tuple[res: Node, act: Action] =
-  if exp.kind != nkLink: return (exp, None)
-  let (held, next) = (exp.held, exp.next)
-  if held.kind == nkLink:
-    let (nheld, act) = modif(held, env)
-    if act != None:
-      return (Node(kind: nkLink, held: nheld, next: next), act)
-  let (nnext, act) = modifMid(next, env)
-  return (Node(kind: nkLink, held: held, next: nnext), act)
+  case exp.kind
+  of nkLink:
+    let (held, next) = (exp.held, exp.next)
+    if held.kind == nkLink:
+      let (nheld, act) = modif(held, env)
+      if act != None:
+        return (Node(kind: nkLink, held: nheld, next: next), act)
+    let (nnext, act) = modifMid(next, env)
+    return (Node(kind: nkLink, held: held, next: nnext), act)
+  else: return (exp, None)
 
-func shape(node: Node): string =
+func utilShape(elem: Elem): string
+func utilShape(node: Node): string =
   case node.kind
-  of nkElem, nkTermin:
+  of nkElem:
+    fmt"{node.kind}[{node.elem.utilShape}]"
+  of nkTermin:
     $node.kind
   of nkLink:
-   fmt"{node.kind}({node.held.kind}, {node.next.kind})"
+   fmt"{node.kind}({node.held.utilShape}, {node.next.utilShape})"
+
+func utilShape(elem: Elem): string =
+  case elem.kind
+  of ekIdent: fmt"{elem.kind}[{elem.id}]"
+  of ekFunc: fmt"{elem.kind}[λ{elem.arg}.{elem.body.utilShape}]"
+
+func utilAllFunc(node: Node): seq[Elem] =
+  discard
 
 proc readRune(stream: Stream): Rune =
   let l = stream.peekStr(1).runeLenAt(0)
@@ -220,11 +233,11 @@ when defined(demo):
 
 type
   StmtKind = enum
-    skNone, skEval, skAssign, skConsist
+    skNone, skEval, skAssign, skConsist, skShape
   Stmt = ref object
     case kind: StmtKind
     of skNone: discard
-    of skEval: exp: Node
+    of skEval, skShape: exp: Node
     of skAssign, skConsist:
       target: seq[Rune]
       value: Node
@@ -241,6 +254,11 @@ proc parseStmt(stream: Stream): Stmt =
   of '('.Rune, LAMBDA, LAMBAR:
     result = Stmt(kind: skEval, exp: stream.parseExpression())
     stream.skip()
+    assert stream.readChar() == '\n'
+  of '?'.Rune:
+    discard stream.readChar()
+    stream.skip()
+    result = Stmt(kind: skShape, exp: stream.parseExpression())
     assert stream.readChar() == '\n'
   else:
     let ident = stream.parseIdentImpl()
@@ -273,6 +291,7 @@ func `$`(stm: Stmt): string =
   of skEval: stm.exp.render()
   of skAssign: fmt"{stm.target} = {stm.value.render}"
   of skConsist: fmt"{stm.target} ::= {stm.value.render}"
+  of skShape: fmt"? {stm.exp.render}"
 
 proc step(stream: Stream, env: var Env) =
   let stm = stream.parseStmt()
@@ -281,6 +300,8 @@ proc step(stream: Stream, env: var Env) =
   of skNone: return
   of skEval:
     discard stm.exp.solveSlow(env)
+  of skShape:
+    echo utilshape(stm.exp.solveSlow(env))
   of skConsist:
     env[stm.target] = stm.value
   of skAssign:
@@ -289,16 +310,20 @@ proc step(stream: Stream, env: var Env) =
 
 block:
   var inp = newStringStream("""
-S ::= ¦f.¦g.¦x.(g x) (f x)
-K ::= ¦x.¦y.x
-I = S K K
-M = S (S K K) (S K K)
+S  ::= ¦f.¦g.¦x. (f x) (g x)
+K  ::= ¦x.¦y.x
+0    = K (S K K)
++1 ::= ¦m.¦f.¦x. f (m f x)
++  ::= ¦n.¦m.¦f.¦x. n f (m f x)
 
-M K I
+1 = +1 0
+2 = +1 1
+3 = +1 2
+4 = +1 3
+
 """)
   var env: Env = newTable[seq[Rune], Node]()
-  var sin = stdin.newFileStream
   while not inp.atEnd():
+    sleep(150)
     inp.step(env)
-    discard sin.readLine()
 
