@@ -155,17 +155,6 @@ func utilAllFuncs(node: Node): seq[Elem] =
     result &= node.held.utilAllFuncs
     result &= node.next.utilAllFuncs
 
-func utilAllFuncs(node: Node): seq[Elem] =
-  result = newSeq[Elem]()
-  case node.kind:
-  of nkElem:
-    if node.elem.kind == ekFunc:
-      result.add node.elem
-  of nkTermin: discard
-  of nkLink:
-    result &= node.held.utilAllFuncs
-    result &= node.next.utilAllFuncs
-
 proc readRune(stream: Stream): Rune =
   let l = stream.peekStr(1).runeLenAt(0)
   stream.readStr(l).runeAt(0)
@@ -269,11 +258,11 @@ type
 
 proc parseStmt(stream: Stream): Stmt =
   stream.skip()
-  while stream.peekChar() == '\n':
-    if stream.atEnd():
-      return Stmt(kind: skNone)
+  while not stream.atEnd() and stream.peekChar() == '\n':
     discard stream.readChar()
     stream.skip()
+  if stream.atEnd():
+    return Stmt(kind: skNone)
 
   case stream.peekRune()
   of '('.Rune, LAMBDA, LAMBAR:
@@ -335,9 +324,7 @@ proc step(stream: Stream, env: var Env) =
 
 when defined(interp):
   var inp = newStringStream("""
-S  ::= ¦f.¦g.¦x. (f x) (g x)
-K  ::= ¦x.¦y.x
-0    = K (S K K)
+0    = ¦f.¦x.x
 +1 ::= ¦m.¦f.¦x. f (m f x)
 +  ::= ¦n.¦m.¦f.¦x. n f (m f x)
 
@@ -346,6 +333,7 @@ K  ::= ¦x.¦y.x
 3 = +1 2
 4 = +1 3
 
++ 2 1
 """)
   var env: Env = newTable[seq[Rune], Node]()
   while not inp.atEnd():
