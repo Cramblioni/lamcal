@@ -144,8 +144,27 @@ func utilShape(elem: Elem): string =
   of ekIdent: fmt"{elem.kind}[{elem.id}]"
   of ekFunc: fmt"{elem.kind}[λ{elem.arg}.{elem.body.utilShape}]"
 
-func utilAllFunc(node: Node): seq[Elem] =
-  discard
+func utilAllFuncs(node: Node): seq[Elem] =
+  result = newSeq[Elem]()
+  case node.kind:
+  of nkElem:
+    if node.elem.kind == ekFunc:
+      result.add node.elem
+  of nkTermin: discard
+  of nkLink:
+    result &= node.held.utilAllFuncs
+    result &= node.next.utilAllFuncs
+
+func utilAllFuncs(node: Node): seq[Elem] =
+  result = newSeq[Elem]()
+  case node.kind:
+  of nkElem:
+    if node.elem.kind == ekFunc:
+      result.add node.elem
+  of nkTermin: discard
+  of nkLink:
+    result &= node.held.utilAllFuncs
+    result &= node.next.utilAllFuncs
 
 proc readRune(stream: Stream): Rune =
   let l = stream.peekStr(1).runeLenAt(0)
@@ -204,10 +223,14 @@ proc parseExpression(stream: Stream): Node =
 proc solve(exp: Node, env: Env): Node =
   var res = exp
   var act = Unpack
+  var prev: Action
   while act != None:
-    echo fmt "{act}\t=> {res.render}"
+    if act == Apply and prev == Unpack:
+      echo fmt "=> {res.render}"
 #    echo fmt "{act}\t:: {shape(res)}"
+    prev = act
     (res, act) = res.modif(env)
+  echo res.render()
   return res
 
 proc solveSlow(exp: Node, env: Env): Node =
@@ -228,7 +251,9 @@ when defined(demo):
   }.newTable
 
   var exp = newStringStream("S (S K K) (S K K)").parseExpression()
-  echo fmt"[{exp.render}]"
+  #for (k, v) in env.pairs:
+  #  exp = exp.subst(k, v)
+  echo fmt"[{exp.render}]", "\n"
   discard solve(exp, env)
 
 type
@@ -308,7 +333,7 @@ proc step(stream: Stream, env: var Env) =
     env[stm.target] = stm.value.solveSlow(env)
   echo "."
 
-block:
+when defined(interp):
   var inp = newStringStream("""
 S  ::= ¦f.¦g.¦x. (f x) (g x)
 K  ::= ¦x.¦y.x
