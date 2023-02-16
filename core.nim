@@ -1,6 +1,7 @@
 
 import unicode
 import strformat
+import tables
 # new core using debruijn indexing to simplify
 # all of this
 
@@ -82,7 +83,18 @@ func renderShape(self: Expression | Node): string =
   when self is Expression:
     case self.kind
     of ekLink:
-      fmt"{self.kind}[{self.held.renderShape}, {self.next.renderShape}]"
+      result = fmt"("
+      var nodes = newSeq[Node]()
+      var acc = self
+      while acc.kind != ekTermin:
+        nodes.add (acc.held)
+        acc = acc.next
+      let ei = nodes.len - 1
+      for i, node in nodes:
+        result &= node.renderShape()
+        if i != ei: result &= ", "
+      result.add ')'
+      return
     of ekTermin:
       $self.kind
   else:
@@ -107,23 +119,24 @@ func subst(fbod: Expression, value: Node, depth=0): Expression =
 func substNode(node: Node, value: Node, depth=0): Node =
   case node.kind
   of nkArg:
-    if node.argind == depth: value
+    if node.argind == depth:
+      value
     else: node
   of nkFunc:
     nFunc(node.body.subst(dobbleNode(value, depth), depth + 1))
   of nkExpr:
     nExpr(node.sexpr.subst(value, depth))
 
-func dedobblenode(node: Node, depth=0): Node
-func dedobble(exp: Expression, depth=0): Expression =
+func dedobblenode(node: Node, depth=1): Node
+func dedobble(exp: Expression, depth=1): Expression =
   case exp.kind
   of ekTermin: exp
   of ekLink: link(dedobbleNode(exp.held, depth), dedobble(exp.next, depth))
 
-func dedobblenode(node: Node, depth=0): Node =
+func dedobblenode(node: Node, depth=1): Node =
   case node.kind
   of nkArg:
-    if node.argind > depth: nArg(depth - 1)
+    if node.argind > depth: nArg(node.argind - 1)
     else: node
   of nkFunc:
     nFunc(node.body.dedobble(depth + 1))
@@ -188,7 +201,7 @@ type ParseResult[T] = object
   of false:
     value: T
 
-func qParse(input: string, off = 0): ParseResult[Expression] =
+func qParse(input: string, env: TableRef[char, Expression]): ParseResult[Expression] =
   type ParseContext = enum
     BaseExpression, Function, SubExpression
   type ContextFrame = object
@@ -230,7 +243,8 @@ func qParse(input: string, off = 0): ParseResult[Expression] =
       cur.exprs.add nArg(get().int - '0'.int)
       step()
     else:
-      step(); continue
+      if get() in env: cur.exprs.add nExpr(env[get()])
+      step()
   
   while cur.context != BaseExpression:
     let prev = popContext
@@ -240,17 +254,24 @@ func qParse(input: string, off = 0): ParseResult[Expression] =
   
   return ParseResult[Expression](isError: false, value: accumNodes(cur.exprs))
 
-let K = link(nFunc(link(nFunc(link(nArg(1), termin())), termin())), termin())
-let RV = qParse(stdin.readLine()) #"/ (/ 0 0) (//2)")
+let ee = newTable[char, Expression]()
+let env = {
+  '+': qParse("////3 1 (2 1 0)", ee).value,
+  'z': qParse("//0", ee).value,
+  ',': qParse("///0 2 1", ee).value,
+  '>': qParse("//0", ee).value,
+  '<': qParse("//1", ee).value,
+  '.': qParse("///1 ( 2 1 0)", ee).value
+}.newTable()
+let RV = qParse(stdin.readLine(), env) #"/ (/ 0 0) (//2)")
 if RV.isError:
   echo(RV.error)
 else:
   let V = RV.value
-  echo V.render
   var (res, act) = V.step()
   while act notin TerminalActions:
+    echo res.renderShape()
     echo act, ": ", res.render()
     (res, act) = res.step()
-  if act in TerminalActions and act != Nothing:
-    echo res.renderShape()
+  echo res.renderShape()
   echo act, ": ", res.render()
