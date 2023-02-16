@@ -1,5 +1,6 @@
 
 import unicode
+import strformat
 # new core using debruijn indexing to simplify
 # all of this
 
@@ -47,7 +48,7 @@ func dobble(exp: Expression, depth=0): Expression =
 func dobbleNode(node: Node, depth=0): Node =
   case node.kind
   of nkArg:
-    if node.argind > depth: nArg(node.argind + 1)
+    if node.argind >= depth: nArg(node.argind + 1)
     else: nArg(node.argind)
   of nkFunc:
     nFunc(node.body.dobble(depth+1))
@@ -77,6 +78,24 @@ func render(node: Node, eoe=false): string =
   of nkExpr:
     "(" & node.sexpr.render() & ")"
 
+func renderShape(self: Expression | Node): string =
+  when self is Expression:
+    case self.kind
+    of ekLink:
+      fmt"{self.kind}[{self.held.renderShape}, {self.next.renderShape}]"
+    of ekTermin:
+      $self.kind
+  else:
+    case self.kind
+    of nkArg:
+      $self.kind
+    of nkFunc:
+      fmt"{self.kind}[{self.body.renderShape}]"
+    of nkExpr:
+      fmt"{self.kind}[{self.sexpr.renderShape}]"
+
+
+
 func substNode(node: Node, value: Node, depth=0): Node
 func subst(fbod: Expression, value: Node, depth=0): Expression =
   case fbod.kind
@@ -95,8 +114,143 @@ func substNode(node: Node, value: Node, depth=0): Node =
   of nkExpr:
     nExpr(node.sexpr.subst(value, depth))
 
-let e = link(nFunc(link(nFunc(link(nArg(1), termin())), termin())), termin())
-echo e.render
-echo e.held.body.subst(nArg(1336)).render
+func dedobblenode(node: Node, depth=0): Node
+func dedobble(exp: Expression, depth=0): Expression =
+  case exp.kind
+  of ekTermin: exp
+  of ekLink: link(dedobbleNode(exp.held, depth), dedobble(exp.next, depth))
 
+func dedobblenode(node: Node, depth=0): Node =
+  case node.kind
+  of nkArg:
+    if node.argind > depth: nArg(depth - 1)
+    else: node
+  of nkFunc:
+    nFunc(node.body.dedobble(depth + 1))
+  of nkExpr:
+    nExpr(node.sexpr.dedobble(depth))
 
+type Action = enum
+  Nothing
+  ErrorEmptyExpression
+  ErrorFunction
+  Unpacking
+  BetaReduction
+  EttaReduction
+
+const TerminalActions = {Nothing, ErrorEmptyExpression, ErrorFunction}
+
+func waddle(exp: Expression): tuple[res: Expression, act: Action]
+func step(exp: Expression): tuple[res: Expression, act: Action] =
+  case exp.kind
+  of ekLink:
+    if exp.next.kind == ekTermin:
+      waddle(exp)
+    elif exp.held.kind == nkFunc:
+      let fres = exp.held.body.subst(exp.next.held).dedobble
+      (link(nExpr(fres), exp.next.next), BetaReduction)
+    else:
+      waddle(exp)
+  of ekTermin:
+    waddle(exp)
+
+func waddle(exp: Expression): tuple[res: Expression, act: Action] =
+  case exp.kind
+  of ekTermin:
+    (exp, Nothing)
+  of ekLink:
+    let (held, next) = (exp.held, exp.next)
+    case held.kind
+    of nkExpr:
+      if held.sexpr.kind == ekTermin:
+        (exp, ErrorEmptyExpression)
+      elif held.sexpr.next.kind == ekTermin:
+        (link(held.sexpr.held, next), Unpacking)
+      else:
+        let (nsexpr, act) = step(held.sexpr)
+        (link(nExpr(nsexpr), next), act)
+    of nkFunc:
+      let (nfbod, act) = step(held.body)
+      (link(nFunc(nfbod), next), act)
+    of nkArg:
+      let (res, act) = waddle(next)
+      (exp.held.link res, act)
+
+func accumNodes(xs: sink seq[Node]): Expression =
+  result = termin()
+  while xs.len > 0:
+    result = link(xs.pop(), result)
+
+type ParseResult[T] = object
+  case isError: bool
+  of true:
+    error: string
+  of false:
+    value: T
+
+func qParse(input: string, off = 0): ParseResult[Expression] =
+  type ParseContext = enum
+    BaseExpression, Function, SubExpression
+  type ContextFrame = object
+    context: ParseContext
+    start: int
+    exprs: seq[Node]
+
+  var ind = 0
+  var contextStack = newSeq[ContextFrame]()
+  template cur: ContextFrame = contextStack[^1]
+  template atEnd: bool = ind == input.len
+  template pushContext(cont: ParseContext) =
+    contextStack.add ContextFrame(context: cont, start: ind, exprs: newSeq[Node]())
+  template popContext: ContextFrame = contextStack.pop()
+  template get: char = input[ind]
+  template step      = ind += 1
+  pushContext(BaseExpression)
+
+  while not atEnd:
+    case get()
+    of ' ':
+      step(); continue
+    of ')':
+      step()
+      while cur.context != SubExpression:
+        let prev = popContext
+        if prev.context == BaseExpression:
+          return ParseResult[Expression](isError: true, error: "Mismatch parenthesis [closing]")
+        cur.exprs.add nFunc(accumNodes(prev.exprs))
+      let sexpr = nExpr(accumNodes(popContext.exprs))
+      cur.exprs.add sexpr
+    of '(':
+      step()
+      pushContext(SubExpression)
+    of '/':
+      step()
+      pushContext(Function)
+    of '0' .. '9':
+      cur.exprs.add nArg(get().int - '0'.int)
+      step()
+    else:
+      step(); continue
+  
+  while cur.context != BaseExpression:
+    let prev = popContext
+    if prev.context == SubExpression:
+      return ParseResult[Expression](isError: true, error: "Mismatch parenthesis [cleanup]")
+    cur.exprs.add nFunc(accumNodes(prev.exprs))
+  
+  return ParseResult[Expression](isError: false, value: accumNodes(cur.exprs))
+
+let K = link(nFunc(link(nFunc(link(nArg(1), termin())), termin())), termin())
+let RV = qParse(stdin.readLine()) #"/ (/ 0 0) (//2)")
+if RV.isError:
+  echo(RV.error)
+else:
+  let V = RV.value
+  echo V.render
+  var (res, act) = V.step()
+  while act notin TerminalActions:
+    echo act, ": ", res.render()
+    (res, act) = res.step()
+  if act in TerminalActions and act != Nothing:
+    echo res.renderShape()
+  echo act, ": ", res.render()
