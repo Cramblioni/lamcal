@@ -56,6 +56,22 @@ func dobbleNode(node: Node, depth=0): Node =
   of nkExpr:
     nExpr(node.sexpr.dobble(depth))
 
+func dedobblenode(node: Node, depth=0): Node
+func dedobble(exp: Expression, depth=0): Expression =
+  case exp.kind
+  of ekTermin: exp
+  of ekLink: link(dedobbleNode(exp.held, depth), dedobble(exp.next, depth))
+
+func dedobblenode(node: Node, depth=0): Node =
+  case node.kind
+  of nkArg:
+    if node.argind >= depth: nArg(node.argind - 1)
+    else: node
+  of nkFunc:
+    nFunc(node.body.dedobble(depth + 1))
+  of nkExpr:
+    nExpr(node.sexpr.dedobble(depth))
+
 func render(node: Node, eoe=false): string
 func render(exp: Expression): string =
   # deconstruct, reconstruct
@@ -123,25 +139,9 @@ func substNode(node: Node, value: Node, depth=0): Node =
       value
     else: node
   of nkFunc:
-    nFunc(node.body.subst(dobbleNode(value, depth), depth + 1))
+    nFunc(node.body.subst(value, depth + 1))
   of nkExpr:
     nExpr(node.sexpr.subst(value, depth))
-
-func dedobblenode(node: Node, depth=1): Node
-func dedobble(exp: Expression, depth=1): Expression =
-  case exp.kind
-  of ekTermin: exp
-  of ekLink: link(dedobbleNode(exp.held, depth), dedobble(exp.next, depth))
-
-func dedobblenode(node: Node, depth=1): Node =
-  case node.kind
-  of nkArg:
-    if node.argind > depth: nArg(node.argind - 1)
-    else: node
-  of nkFunc:
-    nFunc(node.body.dedobble(depth + 1))
-  of nkExpr:
-    nExpr(node.sexpr.dedobble(depth))
 
 type Action = enum
   Nothing
@@ -158,9 +158,12 @@ func step(exp: Expression): tuple[res: Expression, act: Action] =
   case exp.kind
   of ekLink:
     if exp.next.kind == ekTermin:
-      waddle(exp)
+      if exp.held.kind == nkExpr:
+        (exp.held.sexpr, Unpacking)
+      else:
+        waddle(exp)
     elif exp.held.kind == nkFunc:
-      let fres = exp.held.body.subst(exp.next.held).dedobble
+      let fres = exp.held.body.subst(exp.next.held)#exp.next.held.dobbleNode).dedobble
       (link(nExpr(fres), exp.next.next), BetaReduction)
     else:
       waddle(exp)
@@ -247,8 +250,11 @@ func qParse(input: string, env: TableRef[char, Expression]): ParseResult[Express
       cur.exprs.add nArg(get().int - '0'.int)
       step()
     else:
-      if get() in env: cur.exprs.add nExpr(env[get()])
-      step()
+      if get() in env:
+        cur.exprs.add nExpr(env[get()])
+        step()
+      else:
+        return ParseResult[Expression](isError: true, error: fmt"Unrecognised name {get().repr}")
   
   while cur.context != BaseExpression:
     let prev = popContext
@@ -258,16 +264,25 @@ func qParse(input: string, env: TableRef[char, Expression]): ParseResult[Express
   
   return ParseResult[Expression](isError: false, value: accumNodes(cur.exprs))
 
-let ee = newTable[char, Expression]()
-let env = {
-  '+': qParse("////31(210)", ee).value,
-  'z': qParse("//0", ee).value,
-  ',': qParse("///021", ee).value,
-  '>': qParse("//0", ee).value,
-  '<': qParse("//1", ee).value,
-  '.': qParse("///1(210)", ee).value
-}.newTable()
-let RV = qParse(stdin.readLine(), env) #"/ (/ 0 0) (//2)")
+let env = (block:
+  var tmp = newTable[char, Expression]()
+  tmp['+'] = qParse("////31(210)", tmp).value
+  tmp['z']= qParse("//0", tmp).value
+  tmp[',']= qParse("///021", tmp).value
+  tmp['>']= qParse("//0", tmp).value
+  tmp['<']= qParse("//1", tmp).value
+  tmp['.']= qParse("///1(210)", tmp).value
+  tmp['f']= qParse("/0(/,(0>)(+(0<)(0>)))(,z(.z))<",tmp).value
+  tmp['I']= qParse("/0",tmp).value
+  tmp['K']= qParse("//1",tmp).value
+  tmp['S']= qParse("///2 0 (1 0)",tmp).value
+  tmp['*']= qParse("////3(21)",tmp).value
+  tmp
+)
+when not defined(timing):
+  let RV = qParse(stdin.readLine(), env) #"/ (/ 0 0) (//2)")
+else:
+  let RV = qParse("f (.(.(.(.(.(.z))))))", env)
 if RV.isError:
   echo(RV.error)
 else:
@@ -275,7 +290,7 @@ else:
   var (res, act) = V.step()
   while act notin TerminalActions:
     #echo res.renderShape()
-    echo act, ": ", res.render()
+    when not defined(timing): echo act, ": ", res.render()
     (res, act) = res.step()
   #echo res.renderShape()
-  echo act, ": ", res.render()
+  when not defined(timing): echo act, ": ", res.render()
