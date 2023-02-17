@@ -181,7 +181,11 @@ func waddle(exp: Expression): tuple[res: Expression, act: Action] =
         (link(held.sexpr.held, next), Unpacking)
       else:
         let (nsexpr, act) = step(held.sexpr)
-        (link(nExpr(nsexpr), next), act)
+        if act == Nothing:
+          let (nnext, nact) = waddle(next)
+          (link(exp.held, nnext), nact)
+        else:
+          (link(nExpr(nsexpr), next), act)
     of nkFunc:
       let (nfbod, act) = step(held.body)
       (link(nFunc(nfbod), next), act)
@@ -256,12 +260,12 @@ func qParse(input: string, env: TableRef[char, Expression]): ParseResult[Express
 
 let ee = newTable[char, Expression]()
 let env = {
-  '+': qParse("////3 1 (2 1 0)", ee).value,
+  '+': qParse("////31(210)", ee).value,
   'z': qParse("//0", ee).value,
-  ',': qParse("///0 2 1", ee).value,
+  ',': qParse("///021", ee).value,
   '>': qParse("//0", ee).value,
   '<': qParse("//1", ee).value,
-  '.': qParse("///1 ( 2 1 0)", ee).value
+  '.': qParse("///1(210)", ee).value
 }.newTable()
 let RV = qParse(stdin.readLine(), env) #"/ (/ 0 0) (//2)")
 if RV.isError:
@@ -270,8 +274,8 @@ else:
   let V = RV.value
   var (res, act) = V.step()
   while act notin TerminalActions:
-    echo res.renderShape()
+    #echo res.renderShape()
     echo act, ": ", res.render()
     (res, act) = res.step()
-  echo res.renderShape()
+  #echo res.renderShape()
   echo act, ": ", res.render()
