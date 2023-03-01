@@ -7,6 +7,8 @@
 # be treated as a cursor reference, As an argument shouldn't outlive
 # it's respective function.
 
+import strformat
+
 type
   FuncId = distinct int
   ExprKind = enum
@@ -21,6 +23,9 @@ type
     of ekApply:
       targ: Expr
       value: Expr
+
+func `==`(x, y: FuncId): bool =
+  x.int == y.int
 
 func build(exps: seq[Expr]): Expr =
   assert exps.len > 0
@@ -108,11 +113,11 @@ func parseDeBruijn(source: string): Result[ParseError, Expr] =
       continue
     of '0' .. '9':
       let start = cind - 1
-      while peek() in "0123456789": skip()
+      while not atEnd and peek() in "0123456789": skip()
       let ind = evalInt(source, start, cind)
       if ind >= fids.len:
         return error[ParseError, Expr](ParseError(kind: IndexOutOfRange, ind: start))
-      stack[^1].chunks.add Expr(kind: ekArg, fnc: fids[^ind])
+      stack[^1].chunks.add Expr(kind: ekArg, fnc: fids[fids.len - (ind + 1)])
     of '/':
       pushFrame(Func)
     of '(':
@@ -141,18 +146,92 @@ func depth(cur: Expr): int =
       result = 1
       while reg.kind == ekApply:
         inc result
-        reg = cur.targ
+        reg = reg.targ
+
+func unpack(exp: Expr): seq[Expr] =
+  result = newSeq[Expr](depth(exp))
+  var
+    acc = exp
+  for i in countdown(result.len - 1, 1):
+    result[i] = acc.value
+    acc = acc.targ
+  result[0] = acc
+
+func seamlessJoin(strs: seq[string]): string =
+  var slen = 0
+  for s in strs: slen += s.len
+  result = newStringOfCap(slen)
+  for s in strs:
+    for c in s:
+      result.add c
 
 func renderDeBruijn(exp: Expr): string =
-  template shwoop(exp: Expr): seq[Expr] =
-    var
-      cur = exp
-    # calculating depth
-    var res = newSeq[Exp](depth(exp))
-    var acc = exp
-    for i in countdown(res.len - 1, 1):
-      res[i] = acc.value
-      acc = acc.targ
+  type
+    Task = object
+      uexp: seq[Expr]
+      outp: seq[string]
+      ind: int
+  var
+    fids  = newSeqOfCap[FuncId](exp.depth)
+    stack = newSeqOfCap[Task](32)
+  template pushTask(exp: Expr) =
+    let uexp = exp.unpack
+    stack.add Task(uexp: uexp, ind: 0, outp: newSeq[string](uexp.len))
+  template popTask: Task =
+    stack.pop()
+  pushTask(exp)
+  while stack.len > 0:
+    if stack[^1].ind > stack[^1].uexp.len:
+      debugEcho "squashing"
+      if stack.len == 1: break
+      let
+        cur = stack.pop()
+        tind = stack[^1].ind - 1
+        base = stack[^1].uexp[tind]
+      # TODO: implement placing shit
+      case base.kind
+      of ekArg: # inaccessible
+        assert false
+      of ekApply:
+        stack[^1].outp[tind] = "(" & cur.outp.seamlessJoin & ")"
+      of ekFunc:
+        if tind == stack[^1].ind - 1:
+          stack[^1].outp[tind] = "λ" & cur.outp.seamlessJoin
+        else:
+          stack[^1].outp[tind] = "(λ" & cur.outp.seamlessJoin & ")"
+    else:
+      debugEcho fmt"rendering @ {stack[^1].ind} : {stack[^1].uexp.len}"
+      let cur = stack[^1].uexp[stack[^1].ind]
+      inc stack[^1].ind
+      case cur.kind
+      of ekArg:
+        stack[^1].outp[stack[^1].ind] = $(fids.len - fids.find(cur.fnc))
+      of ekFunc:
+        fids.add cur.fid
+        pushTask(cur.body)
+      of ekApply:
+        pushTask(cur)
+  assert stack.len == 1
+  return seamlessJoin(stack[0].outp)
+
+func renderShape(exp: Expr): string =
+  case exp.kind
+  of ekArg: "Arg"
+  of ekApply:
+    let all = unpack(exp)
+    if all.len() == 0:
+      return "<ERROR Apply>"
+    var buff = newSeq[string](all.len * 2 - 1)
+    for i, sexpr in all:
+      buff[i * 2] = renderShape(sexpr)
+      if i < all.len - 1: buff[i * 2 + 1] = ", "
+    fmt"Apply[{buff.seamlessJoin}]"
+  of ekFunc: fmt"Func[{exp.body.renderShape}]"
 
 when isMainModule:
-  echo parseDeBruijn(" (//1))")
+  let tmp = parseDeBruijn("/ (//1) 0 0")
+  echo seamlessJoin(@["testing ", "seam", "less join"])
+  echo tmp
+  if tmp.kind == Success:
+    echo renderShape(tmp.value)
+    echo renderDeBruijn(tmp.value)
