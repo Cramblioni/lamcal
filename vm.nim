@@ -7,7 +7,7 @@
 # be treated as a cursor reference, As an argument shouldn't outlive
 # it's respective function.
 
-import strformat
+import std/[strformat, tables, os, macros, strutils]
 
 type
   FuncId = distinct int
@@ -58,9 +58,13 @@ type
       error: E
     of Success:
       value: S
+macro slet(x: typedesc, i: static int): untyped =
+  getTypeImpl(x)[1][i + 1]
 
 func success*[E, S](value: S): Result[E, S] =
   Result[E, S](kind: Success, value: value)
+func success*[E](): Result[E, void] =
+  Result[E, void](kind: Success)
 func error*[E, S](error: E): Result[E, S] =
   Result[E, S](kind: Error, error: error)
 
@@ -68,18 +72,29 @@ template TRY*[E, T](res: Result[E, T]): T =
   let tmp = res
   case tmp.kind
   of Success:
-    tmp.value
+    when T is void:
+      discard
+    else:
+      tmp.value
   of Error:
-    return error[E, typeof(result.value)](tmp.error)
+    # macro thingy [genericParams(result.type)[1]]
+    return error[E, slet(result.type, 1)](tmp.error)
 
 type 
   ParseErrorKind = enum
     IndexOutOfRange, ParenMismatch, UnexpectedChar
+    UndefinedIdent
   ParseError = object
-    kind: ParseErrorKind
     ind: int
+    case kind: ParseErrorKind
+    of IndexOutOfRange:
+      inv: int
+    of UndefinedIdent:
+      ident: string
+    else: discard
+    
 
-func parseDeBruijn(source: string): Result[ParseError, Expr] =
+func parseDeBruijn(source: string, env=newTable[string, Expr]()): Result[ParseError, Expr] =
   type
     FrameKind = enum
       BaseExpr, Func, Sub
@@ -116,8 +131,16 @@ func parseDeBruijn(source: string): Result[ParseError, Expr] =
       while not atEnd and peek() in "0123456789": skip()
       let ind = evalInt(source, start, cind)
       if ind >= fids.len:
-        return error[ParseError, Expr](ParseError(kind: IndexOutOfRange, ind: start))
+        return error[ParseError, Expr](ParseError(kind: IndexOutOfRange, ind: start, inv: ind))
       stack[^1].chunks.add Expr(kind: ekArg, fnc: fids[fids.len - (ind + 1)])
+    of '`':
+      let start = cind
+      while not atEnd and peek() notin " /)(`": skip()
+      let ident = source[start ..< cind]
+      if ident notin env:
+        return error[ParseError, Expr](ParseError(kind: UndefinedIdent, ind: start - 1,
+                                                  ident: ident))
+      stack[^1].chunks.add env[ident]
     of '/':
       pushFrame(Func)
     of '(':
@@ -165,55 +188,6 @@ func seamlessJoin(strs: seq[string]): string =
     for c in s:
       result.add c
 
-func renderDeBruijn(exp: Expr): string =
-  type
-    Task = object
-      uexp: seq[Expr]
-      outp: seq[string]
-      ind: int
-  var
-    fids  = newSeqOfCap[FuncId](exp.depth)
-    stack = newSeqOfCap[Task](32)
-  template pushTask(exp: Expr) =
-    let uexp = exp.unpack
-    stack.add Task(uexp: uexp, ind: 0, outp: newSeq[string](uexp.len))
-  template popTask: Task =
-    stack.pop()
-  pushTask(exp)
-  while stack.len > 0:
-    if stack[^1].ind > stack[^1].uexp.len:
-      debugEcho "squashing"
-      if stack.len == 1: break
-      let
-        cur = stack.pop()
-        tind = stack[^1].ind - 1
-        base = stack[^1].uexp[tind]
-      # TODO: implement placing shit
-      case base.kind
-      of ekArg: # inaccessible
-        assert false
-      of ekApply:
-        stack[^1].outp[tind] = "(" & cur.outp.seamlessJoin & ")"
-      of ekFunc:
-        if tind == stack[^1].ind - 1:
-          stack[^1].outp[tind] = "λ" & cur.outp.seamlessJoin
-        else:
-          stack[^1].outp[tind] = "(λ" & cur.outp.seamlessJoin & ")"
-    else:
-      debugEcho fmt"rendering @ {stack[^1].ind} : {stack[^1].uexp.len}"
-      let cur = stack[^1].uexp[stack[^1].ind]
-      inc stack[^1].ind
-      case cur.kind
-      of ekArg:
-        stack[^1].outp[stack[^1].ind] = $(fids.len - fids.find(cur.fnc))
-      of ekFunc:
-        fids.add cur.fid
-        pushTask(cur.body)
-      of ekApply:
-        pushTask(cur)
-  assert stack.len == 1
-  return seamlessJoin(stack[0].outp)
-
 func renderShape(exp: Expr): string =
   case exp.kind
   of ekArg: "Arg"
@@ -228,10 +202,122 @@ func renderShape(exp: Expr): string =
     fmt"Apply[{buff.seamlessJoin}]"
   of ekFunc: fmt"Func[{exp.body.renderShape}]"
 
+
+func renderDeBruijn(exp: Expr): string =
+  type
+    Task = object
+      uexp: seq[Expr]
+      outp: seq[string]
+      ind: int
+  var
+    fids  = newSeqOfCap[FuncId](exp.depth)
+    stack = newSeqOfCap[Task](32)
+  template pushTask(exp: Expr) =
+    # debugEcho "Pushing Task ", exp.renderShape
+    let uexp = exp.unpack
+    stack.add Task(uexp: uexp, ind: 0, outp: newSeq[string](uexp.len + 1))
+  template popTask: Task =
+    stack.pop()
+  template head: Task =
+    stack[^1]
+  pushTask(exp)
+  while stack.len > 0:
+    if head.ind >= head.uexp.len:
+      # debugEcho "squashing"
+      if stack.len == 1: break
+      let
+        cur = stack.pop()
+        tind = head.ind - 1
+        base = head.uexp[tind]
+      # TODO: implement placing shit
+      case base.kind
+      of ekArg: # inaccessible
+        assert false
+      of ekApply:
+        head.outp[tind] = "(" & cur.outp.seamlessJoin & ")"
+      of ekFunc:
+        discard fids.pop()
+        let atend = head.ind >= head.uexp.len 
+        head.outp[tind] = (if atend:
+            "λ" & cur.outp.seamlessJoin
+          else:
+            "(λ" & cur.outp.seamlessJoin & ")")
+    else:
+      # debugEcho fmt"rendering @ {head.ind} : {head.uexp.len}"
+      let cur = head.uexp[head.ind]
+      inc head.ind
+      case cur.kind
+      of ekArg:
+        head.outp[head.ind - 1] = $(fids.len - fids.find(cur.fnc) - 1) & " "
+      of ekFunc:
+        fids.add cur.fid
+        pushTask(cur.body)
+      of ekApply:
+        pushTask(cur)
+  assert stack.len == 1
+  return seamlessJoin(stack[0].outp)
+
+func subst(base: Expr, id: FuncId, value: Expr): Expr =
+  case base.kind
+  of ekArg:
+    if base.fnc == id: value
+    else: base
+  of ekFunc:
+    Expr(kind: ekFunc, fid: base.fid, body: base.body.subst(id, value))
+  of ekApply:
+    Expr(kind: ekApply, targ: base.targ.subst(id, value),
+                       value: base.value.subst(id, value))
+
+type Action = enum
+  Nothing, BetaReduction, Start
+
+func modifMid(exp: Expr): tuple[res: Expr, act: Action]
+func modif(exp: Expr): tuple[res: Expr, act: Action] =
+  # we want this to continue onto a alt of this
+  case exp.kind
+  of ekApply:
+    if exp.targ.kind == ekFunc:
+      (exp.targ.body.subst(exp.targ.fid, exp.value), BetaReduction)
+    else:
+      modifMid(exp)
+  else:
+    modifMid(exp)
+
+func modifMid(exp: Expr): tuple[res: Expr, act: Action] =
+  case exp.kind
+  of ekApply:
+    if exp.targ.kind == ekApply:
+      let (res, act) = modif(exp.targ)
+      (Expr(kind: ekApply, targ: res, value: exp.value), act)
+    else:
+      let (res, act) = modif(exp.value)
+      (Expr(kind: ekApply, targ: exp.targ, value: res), act)
+  of ekFunc:
+    let (res, act) = modif(exp.body)
+    (Expr(kind: ekFunc, fid: exp.fid, body: res), act)
+  else:
+    (exp, Nothing)
+
+proc solve(exp: Expr, slow: static bool = false): Expr =
+  var act = Start
+  result = exp
+  while act != Nothing:
+    (result, act) = result.modif
+    echo fmt"{act} : {result.renderDeBruijn}"
+    when slow: sleep(50)
+
+proc interpDeBruijn(source: string): Result[ParseError, void] =
+  result = success[ParseError]()
+  var env = newTable[string, Expr]()
+  for line in source.splitLines:
+    if line == "": continue
+    discard solve(TRY parseDeBruijn(line))
+
 when isMainModule:
-  let tmp = parseDeBruijn("/ (//1) 0 0")
-  echo seamlessJoin(@["testing ", "seam", "less join"])
-  echo tmp
-  if tmp.kind == Success:
-    echo renderShape(tmp.value)
-    echo renderDeBruijn(tmp.value)
+  # let tmp = parseDeBruijn("(////3 1 (2 1 0)) (//1(1(1(1 0)))) (//1 0)")
+  let tmp = interpDeBruijn("(///0 2 1) (//0) (//1 0)")
+  case tmp.kind
+  of Error:
+    echo tmp.error
+  of Success:
+    echo "Done"
